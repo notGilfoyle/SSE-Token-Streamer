@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SSE Token Streamer</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+      width: 100%;
+      max-width: 680px;
+      overflow: hidden;
+    }
+
+    .card-header {
+      padding: 1.25rem 1.5rem;
+      border-bottom: 1px solid #eee;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .card-header h1 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: #111;
+    }
+
+    .badge {
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 0.2rem 0.5rem;
+      border-radius: 99px;
+      background: #e8f5e9;
+      color: #2e7d32;
+      letter-spacing: 0.03em;
+    }
+
+    .response-area {
+      min-height: 160px;
+      max-height: 380px;
+      overflow-y: auto;
+      padding: 1.25rem 1.5rem;
+      font-size: 0.95rem;
+      line-height: 1.7;
+      color: #222;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .response-area:empty::before {
+      content: "Response will appear here…";
+      color: #aaa;
+    }
+
+    .cursor {
+      display: inline-block;
+      width: 2px;
+      height: 1.1em;
+      background: #555;
+      vertical-align: text-bottom;
+      animation: blink 0.8s step-end infinite;
+      margin-left: 1px;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0; }
+    }
+
+    .input-row {
+      display: flex;
+      gap: 0.5rem;
+      padding: 1rem 1.5rem 1.25rem;
+      border-top: 1px solid #eee;
+    }
+
+    .input-row input {
+      flex: 1;
+      padding: 0.6rem 0.9rem;
+      border: 1.5px solid #ddd;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .input-row input:focus { border-color: #555; }
+
+    .input-row button {
+      padding: 0.6rem 1.2rem;
+      background: #111;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .input-row button:hover:not(:disabled) { background: #333; }
+    .input-row button:disabled { background: #aaa; cursor: not-allowed; }
+
+    .status-bar {
+      min-height: 1.6rem;
+      padding: 0.25rem 1.5rem 0.5rem;
+      font-size: 0.78rem;
+      color: #888;
+    }
+
+    .status-bar.error { color: #c0392b; }
+
+    .endpoint-toggle {
+      display: flex;
+      gap: 0.5rem;
+      padding: 0 1.5rem 0.75rem;
+    }
+
+    .endpoint-toggle label {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.82rem;
+      color: #555;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="card-header">
+      <h1>SSE Token Streamer</h1>
+      <span class="badge">LIVE</span>
+    </div>
+
+    <div class="response-area" id="response"></div>
+
+    <div class="status-bar" id="status"></div>
+
+    <div class="endpoint-toggle">
+      <label>
+        <input type="radio" name="endpoint" value="fake" checked /> Fake (no API key)
+      </label>
+      <label>
+        <input type="radio" name="endpoint" value="real" /> Real (Anthropic)
+      </label>
+    </div>
+
+    <div class="input-row">
+      <input id="prompt" type="text" placeholder="Type a prompt…" value="Tell me about Server-Sent Events" />
+      <button id="send-btn" onclick="sendPrompt()">Send</button>
+    </div>
+  </div>
+
+  <script>
+    let eventSource = null;
+    let cursorEl = null;
+
+    const responseEl = document.getElementById("response");
+    const statusEl   = document.getElementById("status");
+    const sendBtn    = document.getElementById("send-btn");
+    const promptEl   = document.getElementById("prompt");
+
+    promptEl.addEventListener("keydown", e => {
+      if (e.key === "Enter" && !sendBtn.disabled) sendPrompt();
+    });
+
+    function getEndpoint() {
+      return document.querySelector('input[name="endpoint"]:checked').value;
+    }
+
+    function setStatus(msg, isError = false) {
+      statusEl.textContent = msg;
+      statusEl.className = "status-bar" + (isError ? " error" : "");
+    }
+
+    function setStreaming(active) {
+      sendBtn.disabled = active;
+      promptEl.disabled = active;
+    }
+
+    function appendCursor() {
+      cursorEl = document.createElement("span");
+      cursorEl.className = "cursor";
+      responseEl.appendChild(cursorEl);
+    }
+
+    function removeCursor() {
+      if (cursorEl) { cursorEl.remove(); cursorEl = null; }
+    }
+
+    function sendPrompt() {
+      if (eventSource) { eventSource.close(); eventSource = null; }
+
+      const prompt = promptEl.value.trim();
+      const route  = getEndpoint() === "real" ? "/stream-real" : "/stream";
+      const url    = `${route}?prompt=${encodeURIComponent(prompt)}`;
+
+      responseEl.textContent = "";
+      setStatus("Connecting…");
+      setStreaming(true);
+      appendCursor();
+
+      eventSource = new EventSource(url);
+
+      eventSource.onopen = () => setStatus("Streaming…");
+
+      eventSource.onmessage = (e) => {
+        try {
+          const { token } = JSON.parse(e.data);
+          removeCursor();
+          responseEl.appendChild(document.createTextNode(token));
+          appendCursor();
+          responseEl.scrollTop = responseEl.scrollHeight;
+        } catch (_) {}
+      };
+
+      eventSource.addEventListener("done", () => {
+        removeCursor();
+        eventSource.close();
+        eventSource = null;
+        setStatus("Done.");
+        setStreaming(false);
+      });
+
+      eventSource.onerror = () => {
+        if (eventSource && eventSource.readyState === EventSource.CLOSED) {
+          removeCursor();
+          setStatus("Connection lost. Refresh and try again.", true);
+          setStreaming(false);
+          eventSource = null;
+        } else {
+          setStatus("Connection issue — reconnecting…", true);
+        }
+      };
+    }
+  </script>
+</body>
+</html>
